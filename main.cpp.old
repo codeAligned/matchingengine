@@ -1,0 +1,206 @@
+#include <iostream>
+#include <sstream>
+#include <vector>
+#include <functional>
+#include <memory>
+#include <unordered_map>
+
+//MessageReader reads next message off stream, stores it, makes it available
+//MessageParser gets last read message from MessageReader, parses it, makes tokens available
+//InstructionFactory receives vector of message tokens, returns ptr to an Instruction
+//There are five types of Instruction falling into two intermediate types
+//The first intermediate type is EngineInstruction, which only has Print
+//The second type is an OrderInstruction, which has Buy, Sel, Mod, Can
+//Only the OrderTypes need a creator map in the Factor currently
+//The creators are registered in the anonymous namespace ... this 
+//will make more sense when things are split up into separate files
+//After an instruction is created we pass it to the InstructionProcessor
+
+
+struct MessageReader
+{
+  //reads next message off the stream, stores it
+  //makes it available through lastMessageRead
+  //can also get ref to all messages
+  //if we introduce time stamping, it will be in the MessageReader
+  void readNextMessage(std::istream & is) 
+  {
+    mMessagesRead.push_back("");
+    std::getline(is, mMessagesRead.back());    
+  }
+  std::string const & lastMessageRead() const {return mMessagesRead.back();}
+  std::vector<std::string> const & allMessages() const {return mMessagesRead;}
+private:
+  std::vector<std::string> mMessagesRead;    
+};
+
+struct MessageParser
+{//tokenizes message, makes and returns Instruction?
+  std::vector<std::string> messageTokens(std::string const & message) const
+  {
+    auto tokens = std::vector<std::string>();
+    auto tokenStart = 0;
+    auto messageEnd = message.size();
+    for (auto i = 0; i < messageEnd; ++i)
+    {
+      if (message[i] == ' ')
+      {
+        tokens.push_back(message.substr(tokenStart, i - tokenStart));
+        tokenStart = i + 1;
+      } 
+    }
+    tokens.push_back(message.substr(tokenStart, messageEnd - tokenStart)); 
+    return tokens;
+  }
+};
+
+struct Instruction;
+
+struct InstructionProcessor
+{//does not take ownership of instructions
+  void processEngineInstruction(Instruction const * const)
+  {
+    std::cout << "processing engine instruction" << std::endl;
+  }
+  void processOrderInstruction(Instruction const * const)
+  {
+    std::cout << "processing order instruction" << std::endl;
+  }
+};
+
+struct Instruction
+{
+  virtual ~Instruction() =0;
+
+  virtual void enterInstructionProcessor(InstructionProcessor &) const =0;
+};
+Instruction::~Instruction(){}
+
+struct EngineInstruction : public Instruction
+{
+  virtual void enterInstructionProcessor(InstructionProcessor & ip) const override
+  {
+    ip.processEngineInstruction(this);
+  }
+  virtual ~EngineInstruction() override =0;
+};
+EngineInstruction::~EngineInstruction(){}
+
+struct Print : public EngineInstruction
+{
+  virtual ~Print() override {}
+};
+
+struct OrderInstruction : public Instruction
+{
+  virtual void enterInstructionProcessor(InstructionProcessor & ip) const override
+  {
+    ip.processOrderInstruction(this);
+  }
+  virtual ~OrderInstruction() override =0;
+};
+OrderInstruction::~OrderInstruction(){}
+
+struct Buy : OrderInstruction
+{
+  virtual ~Buy() override {}
+};
+
+struct Sel : OrderInstruction
+{
+  virtual ~Sel() override {}
+};
+
+struct Mod : OrderInstruction
+{
+  virtual ~Mod() override {}
+};
+
+struct Can : OrderInstruction
+{
+  virtual ~Can() override {}
+};
+
+struct InstructionFactory
+{
+  using order_instruction_ptr_t = std::unique_ptr<OrderInstruction>;
+  using order_inst_creator_t    = std::function<order_instruction_ptr_t(std::vector<std::string> const &)>;
+
+  static InstructionFactory & TheInstructionFactory()
+  {
+    static auto TheFactory = InstructionFactory();
+    return TheFactory;
+  }
+  static bool RegisterOrderInstructionType(std::string const & messageVerb, order_inst_creator_t && creator)
+  {
+    auto & f = TheInstructionFactory();//we are not checking for overwrites here
+    f.mOrderInstructionMap[messageVerb] = std::move(creator);
+    return true;
+  }
+private:
+  InstructionFactory():mOrderInstructionMap(){}
+public:
+  std::unique_ptr<Instruction> createInstruction(std::vector<std::string> const & messageTokens) const
+  {
+    auto const & messageVerb = messageTokens.front();
+    if (messageVerb == "PRINT")
+      return createEngineInstruction(messageVerb, messageTokens);
+    else 
+      return createOrderInstruction(messageVerb, messageTokens);
+  }
+private:
+  std::unique_ptr<EngineInstruction> createEngineInstruction(std::string const & messageVerb, 
+                                                             std::vector<std::string> const & messageTokens) const
+  {
+    //we know it's only print at this point
+    return std::unique_ptr<Print>(new Print());
+  }
+  std::unique_ptr<OrderInstruction> createOrderInstruction(std::string const & messageVerb,
+                                                           std::vector<std::string> const & messageTokens) const
+  {
+    return (mOrderInstructionMap.at(messageVerb))(messageTokens);
+  }
+private:
+  std::unordered_map<std::string, order_inst_creator_t> mOrderInstructionMap;
+};
+
+namespace {
+#define REGISTER_ORDER_INSTRUCTION_TYPE(VERB, CLASS)                                                         \
+  static auto const CLASS##Creator = [](std::vector<std::string> const &)->std::unique_ptr<OrderInstruction>     \
+  {                                                                                                          \
+    return std::unique_ptr<CLASS>(new CLASS());                                                                  \
+  };                                                                                                         \
+  static auto const CLASS##Reg = InstructionFactory::RegisterOrderInstructionType(VERB, std::move(CLASS##Creator)); \
+  
+  REGISTER_ORDER_INSTRUCTION_TYPE("BUY",    Buy)
+  REGISTER_ORDER_INSTRUCTION_TYPE("SELL",   Sel)
+  REGISTER_ORDER_INSTRUCTION_TYPE("MODIFY", Mod)
+  REGISTER_ORDER_INSTRUCTION_TYPE("CANCEL", Can)
+
+#undef REGISTER_ORDER_INSTRUCTION_TYPE
+  
+} //end anonymous registration namespace
+
+int main()
+{
+  auto s = std::stringstream();
+  s << "BUY GFD 1000 10 order1"     << std::endl;
+  s << "MODIFY order1 SELL 1000 11" << std::endl;
+  s << "PRINT"                      << std::endl;
+
+  auto reader    = MessageReader();
+  auto parser    = MessageParser();
+  auto processor = InstructionProcessor();
+  reader.readNextMessage(s);
+  reader.readNextMessage(s);
+  reader.readNextMessage(s);
+  for (auto const & m : reader.allMessages())
+  {
+    auto const tokens      = parser.messageTokens(m);
+    auto const instruction = InstructionFactory::TheInstructionFactory().createInstruction(tokens);
+    instruction->enterInstructionProcessor(processor);
+  } 
+
+  std::cout << "matching engine exiting" << std::endl;
+  return 0;
+}
